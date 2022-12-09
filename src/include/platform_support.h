@@ -20,9 +20,9 @@
 #ifndef INCLUDE_PLATFORM_SUPPORT_H
 #define INCLUDE_PLATFORM_SUPPORT_H
 
-#ifndef INCLUDE_GENERAL_H
-#	error "Include 'general.h' instead"
-#endif
+// #ifndef INCLUDE_GENERAL_H
+// #	error "Include 'general.h' instead"
+// #endif
 
 #include "target.h"
 

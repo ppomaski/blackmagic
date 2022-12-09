@@ -53,7 +53,7 @@ static bool cmd_version(target *t, int argc, const char **argv);
 static bool cmd_help(target *t, int argc, const char **argv);
 
 static bool cmd_jtag_scan(target *t, int argc, const char **argv);
-static bool cmd_swdp_scan(target *t, int argc, const char **argv);
+// static bool cmd_swdp_scan(target *t, int argc, const char **argv);
 static bool cmd_auto_scan(target *t, int argc, const char **argv);
 static bool cmd_frequency(target *t, int argc, const char **argv);
 static bool cmd_targets(target *t, int argc, const char **argv);

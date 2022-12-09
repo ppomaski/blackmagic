@@ -35,4 +35,6 @@ int command_process(target *t, char *cmd);
  */
 bool parse_enable_or_disable(const char *s, bool *out);
 
+bool cmd_swdp_scan(target *t, int argc, const char **argv);
+
 #endif /* INCLUDE_COMMAND_H */
