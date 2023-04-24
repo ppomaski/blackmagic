@@ -38,7 +38,7 @@
 #include "general.h"
 #include "target_internal.h"
 
-target_flash_s *target_flash_for_addr(target *t, uint32_t addr)
+target_flash_s *target_flash_for_addr(target_s *t, uint32_t addr)
 {
 	for (target_flash_s *f = t->flash; f; f = f->next) {
 		if (f->start <= addr && addr < f->start + f->length)
@@ -47,7 +47,7 @@ target_flash_s *target_flash_for_addr(target *t, uint32_t addr)
 	return NULL;
 }
 
-static bool target_enter_flash_mode(target *t)
+static bool target_enter_flash_mode(target_s *t)
 {
 	if (t->flash_mode)
 		return true;
@@ -66,7 +66,7 @@ static bool target_enter_flash_mode(target *t)
 	return ret;
 }
 
-static bool target_exit_flash_mode(target *t)
+static bool target_exit_flash_mode(target_s *t)
 {
 	if (!t->flash_mode)
 		return true;
@@ -117,17 +117,20 @@ static bool flash_done(target_flash_s *f)
 	return ret;
 }
 
-bool target_flash_erase(target *t, target_addr_t addr, size_t len)
+bool target_flash_erase(target_s *t, target_addr_t addr, size_t len)
 {
 	if (!target_enter_flash_mode(t))
 		return false;
 
 	target_flash_s *active_flash = target_flash_for_addr(t, addr);
+	if (!active_flash)
+		return false;
+
 	bool ret = true; /* Catch false returns with &= */
 	while (len) {
 		target_flash_s *f = target_flash_for_addr(t, addr);
 		if (!f) {
-			DEBUG_WARN("Requested address is outside the valid range 0x%06" PRIx32 "\n", addr);
+			DEBUG_ERROR("Requested address is outside the valid range 0x%06" PRIx32 "\n", addr);
 			return false;
 		}
 
@@ -145,7 +148,7 @@ bool target_flash_erase(target *t, target_addr_t addr, size_t len)
 
 		ret &= f->erase(f, local_start_addr, f->blocksize);
 		if (!ret) {
-			DEBUG_WARN("Erase failed at %" PRIx32 "\n", local_start_addr);
+			DEBUG_ERROR("Erase failed at %" PRIx32 "\n", local_start_addr);
 			break;
 		}
 
@@ -162,7 +165,7 @@ bool flash_buffer_alloc(target_flash_s *flash)
 	/* Allocate buffer */
 	flash->buf = malloc(flash->writebufsize);
 	if (!flash->buf) { /* malloc failed: heap exhaustion */
-		DEBUG_WARN("malloc: failed in %s\n", __func__);
+		DEBUG_ERROR("malloc: failed in %s\n", __func__);
 		return false;
 	}
 	flash->buf_addr_base = UINT32_MAX;
@@ -229,7 +232,7 @@ static bool flash_buffered_write(target_flash_s *f, target_addr_t dest, const vo
 	return ret;
 }
 
-bool target_flash_write(target *t, target_addr_t dest, const void *src, size_t len)
+bool target_flash_write(target_s *t, target_addr_t dest, const void *src, size_t len)
 {
 	if (!target_enter_flash_mode(t))
 		return false;
@@ -271,7 +274,7 @@ bool target_flash_write(target *t, target_addr_t dest, const void *src, size_t l
 
 		ret &= flash_buffered_write(f, dest, src, local_length);
 		if (!ret) {
-			DEBUG_WARN("Write failed at %" PRIx32 "\n", dest);
+			DEBUG_ERROR("Write failed at %" PRIx32 "\n", dest);
 			break;
 		}
 
@@ -282,7 +285,7 @@ bool target_flash_write(target *t, target_addr_t dest, const void *src, size_t l
 	return ret;
 }
 
-bool target_flash_complete(target *t)
+bool target_flash_complete(target_s *t)
 {
 	if (!t->flash_mode)
 		return false;

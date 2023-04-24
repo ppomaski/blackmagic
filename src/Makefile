@@ -3,14 +3,21 @@ PLATFORM_DIR = platforms/$(PROBE_HOST)
 VPATH += $(PLATFORM_DIR) target
 ENABLE_DEBUG ?=
 
+SYS = $(shell $(CC) -dumpmachine)
+
 ifneq ($(V), 1)
 MAKEFLAGS += --no-print-dir
 Q := @
 endif
 
-CFLAGS += -Wall -Wextra -Werror -Wno-char-subscripts \
+CFLAGS += -Wall -Wextra -Werror -Wreturn-type \
+	-Wno-char-subscripts \
 	-std=c11 -g3 -MD -I./target \
 	-I. -Iinclude -I$(PLATFORM_DIR)
+
+ifeq (filter, macosx darwin, $(SYS))
+CFLAGS += -Wmaybe-uninitialized -Wstringop-overflow -Wunsafe-loop-optimizations
+endif
 
 ifeq ($(ENABLE_DEBUG), 1)
 CFLAGS += -DENABLE_DEBUG
@@ -32,6 +39,7 @@ SRC =              \
 	gdb_packet.c   \
 	gdb_reg.c      \
 	hex_utils.c    \
+	imxrt.c        \
 	jtag_devs.c    \
 	jtag_scan.c    \
 	lmi.c          \
@@ -39,8 +47,10 @@ SRC =              \
 	lpc11xx.c      \
 	lpc17xx.c      \
 	lpc15xx.c      \
+	lpc40xx.c      \
 	lpc43xx.c      \
 	lpc546xx.c     \
+	lpc55xx.c      \
 	kinetis.c      \
 	main.c         \
 	morse.c        \
@@ -67,7 +77,9 @@ SRC =              \
 	target_flash.c \
 	target_probe.c
 
+ifeq (,$(filter all_platforms,$(MAKECMDGOALS)))
 include $(PLATFORM_DIR)/Makefile.inc
+endif
 
 ifneq ($(PC_HOSTED),1)
 # Output memory usage information
@@ -191,7 +203,7 @@ else
 	@# to the file. This is fine and probably makes the file more human-readable, but
 	@# also means we have to account for that newline in this comparison.
 	$(Q)if [ ! -f $@ ] || [ "$$(cat $@)" != "$$(echo '$(VERSION_HEADER)\n')" ]; then \
-		echo " GEN $@"; \
+		echo " GEN      $@"; \
 		echo '$(VERSION_HEADER)' > $@; \
 	fi
 endif
@@ -199,4 +211,6 @@ endif
 clang-format:
 	$(Q)clang-format -i *.c */*.c */*/*.c *.h */*.h */*/*.h
 
+ifeq (,$(filter clean,$(MAKECMDGOALS)))
 -include *.d
+endif

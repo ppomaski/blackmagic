@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2008  Black Sphere Technologies Ltd.
  * Written by Gareth McMullin <gareth@blacksphere.co.nz>
+ * Copyright (C) 2022-2023 1BitSquared <info@1bitsquared.com>
+ * Modified by Rachel Mant <git@dragonmux.network>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,9 +20,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* Low level JTAG implementation using FT2232 with libftdi.
- *
- */
+/* Low level JTAG implementation using FTDI parts via libftdi. */
 
 #include "general.h"
 #include <unistd.h>
@@ -28,103 +28,119 @@
 #include <ftdi.h>
 #include "ftdi_bmp.h"
 
+static void ftdi_jtag_reset(void);
+static void ftdi_jtag_tms_seq(uint32_t tms_states, size_t clock_cycles);
+static void ftdi_jtag_tdi_seq(bool final_tms, const uint8_t *data_in, size_t clock_cycles);
+static bool ftdi_jtag_next(bool tms, bool tdi);
 
-extern cable_desc_t *active_cable;
-extern struct ftdi_context *ftdic;
+/*
+ * Throughout this file you will see command buffers being built which have the following basic form:
+ *
+ * The command block (3 bytes):
+ * ┌─────────┬─────────────┬───────────┐
+ * │    0    │      1      │     2     │
+ * ├─────────┼─────────────┼───────────┤
+ * │ Command │ Cycle count │ Data bits │
+ * │         │     (-1)    │    LBE    │
+ * └─────────┴─────────────┴───────────┘
+ * where LBE == Little Bit Endian.
+ *
+ * These are then sequenced into command buffers:
+ * ┌─────────────────┬─────┐
+ * │ Command block 0 │ ... │
+ * └─────────────────┴─────┘
+ *
+ * Each command block is allowed to handle at most 7 clock cycles - why not 8 is undocumented.
+ */
 
-static void jtagtap_reset(void);
-static void jtagtap_tms_seq(uint32_t tms_states, size_t ticks);
-static void jtagtap_tdi_seq(bool final_tms, const uint8_t *DI, size_t ticks);
-static bool jtagtap_next(bool dTMS, bool dTDI);
-
-int libftdi_jtagtap_init(jtag_proc_t *jtag_proc)
+void ftdi_jtag_drain_potential_garbage(void)
 {
-	if ((active_cable->mpsse_swd_read.set_data_low == MPSSE_DO) &&
-		(active_cable->mpsse_swd_write.set_data_low == MPSSE_DO)) {
-		printf("Jtag not possible with resistor SWD!\n");
-			return -1;
-	}
-	jtag_proc->jtagtap_reset = jtagtap_reset;
-	jtag_proc->jtagtap_next =jtagtap_next;
-	jtag_proc->jtagtap_tms_seq = jtagtap_tms_seq;
-	jtag_proc->jtagtap_tdi_tdo_seq = libftdi_jtagtap_tdi_tdo_seq;
-	jtag_proc->jtagtap_tdi_seq = jtagtap_tdi_seq;
-
-	active_state.data_low  |=   active_cable->jtag.set_data_low |
-		MPSSE_CS | MPSSE_DI | MPSSE_DO;
-	active_state.data_low  &= ~(active_cable->jtag.clr_data_low | MPSSE_SK);
-	active_state.ddr_low   |=   MPSSE_CS | MPSSE_DO | MPSSE_SK;
-	active_state.ddr_low   &= ~(MPSSE_DI);
-	active_state.data_high |=   active_cable->jtag.set_data_high;
-	active_state.data_high &= ~(active_cable->jtag.clr_data_high);
-	uint8_t gab[16];
-	int garbage =  ftdi_read_data(ftdic, gab, sizeof(gab));
+	uint8_t data[16];
+	int garbage = ftdi_read_data(info.ftdi_ctx, data, sizeof(data));
 	if (garbage > 0) {
 		DEBUG_WARN("FTDI JTAG init got garbage:");
 		for (int i = 0; i < garbage; i++)
-			DEBUG_WARN(" %02x", gab[i]);
+			DEBUG_WARN(" %02x", data[i]);
 		DEBUG_WARN("\n");
 	}
-	uint8_t cmd_write[16] = {
-		SET_BITS_LOW,  active_state.data_low,
-		active_state.ddr_low,
-		SET_BITS_HIGH, active_state.data_high, active_state.ddr_high};
-	libftdi_buffer_write(cmd_write, 6);
-	libftdi_buffer_flush();
-	/* Write out start condition and pull garbage from read buffer.
-	 * FT2232D otherwise misbehaves on runs follwoing the first run.*/
-	garbage =  ftdi_read_data(ftdic, cmd_write, sizeof(cmd_write));
-	if (garbage > 0) {
-		DEBUG_WARN("FTDI JTAG end init got garbage:");
-		for (int i = 0; i < garbage; i++)
-			DEBUG_WARN(" %02x", cmd_write[i]);
-		DEBUG_WARN("\n");
-	}
-	/* Go to JTAG mode for SWJ-DP */
-	for (int i = 0; i <= 50; i++)
-		jtag_proc->jtagtap_next(1, 0);          /* Reset SW-DP */
-	jtag_proc->jtagtap_tms_seq(0xE73C, 16);		/* SWD to JTAG sequence */
-	jtag_proc->jtagtap_tms_seq(0x1F, 6);
-
-	return 0;
 }
 
-static void jtagtap_reset(void)
+bool ftdi_jtag_init(void)
+{
+	if (active_cable.mpsse_swd_read.set_data_low == MPSSE_DO && active_cable.mpsse_swd_write.set_data_low == MPSSE_DO) {
+		DEBUG_ERROR("JTAG not possible with resistor SWD!\n");
+		return false;
+	}
+
+	jtag_proc.jtagtap_reset = ftdi_jtag_reset;
+	jtag_proc.jtagtap_next = ftdi_jtag_next;
+	jtag_proc.jtagtap_tms_seq = ftdi_jtag_tms_seq;
+	jtag_proc.jtagtap_tdi_tdo_seq = ftdi_jtag_tdi_tdo_seq;
+	jtag_proc.jtagtap_tdi_seq = ftdi_jtag_tdi_seq;
+	jtag_proc.tap_idle_cycles = 1;
+
+	active_state.data_low |= active_cable.jtag.set_data_low | MPSSE_CS | MPSSE_DI | MPSSE_DO;
+	active_state.data_low &= ~(active_cable.jtag.clr_data_low | MPSSE_SK);
+	active_state.ddr_low |= MPSSE_CS | MPSSE_DO | MPSSE_SK;
+	active_state.ddr_low &= ~MPSSE_DI;
+	active_state.data_high |= active_cable.jtag.set_data_high;
+	active_state.data_high &= ~active_cable.jtag.clr_data_high;
+	ftdi_jtag_drain_potential_garbage();
+
+	const uint8_t cmd[6] = {
+		SET_BITS_LOW,
+		active_state.data_low,
+		active_state.ddr_low,
+		SET_BITS_HIGH,
+		active_state.data_high,
+		active_state.ddr_high,
+	};
+	libftdi_buffer_write_arr(cmd);
+	libftdi_buffer_flush();
+	/* Write out start condition and pull garbage from read buffer.
+	 * FT2232D otherwise misbehaves on runs following the first run.*/
+	ftdi_jtag_drain_potential_garbage();
+
+	/* Ensure we're in JTAG mode */
+	for (size_t i = 0; i <= 50U; ++i)
+		ftdi_jtag_next(true, false); /* 50 + 1 idle cycles for SWD reset */
+	ftdi_jtag_tms_seq(0xe73cU, 16U); /* SWD to JTAG sequence */
+	return true;
+}
+
+static void ftdi_jtag_reset(void)
 {
 	jtagtap_soft_reset();
 }
 
-static void jtagtap_tms_seq(uint32_t tms_states, size_t ticks)
+static void ftdi_jtag_tms_seq(uint32_t tms_states, const size_t clock_cycles)
 {
-	uint8_t tmp[3] = {MPSSE_WRITE_TMS | MPSSE_LSB | MPSSE_BITMODE | MPSSE_WRITE_NEG, 0, 0};
-	while (ticks > 0) {
-		tmp[1] = ticks < 7 ? ticks - 1 : 6;
-		tmp[2] = 0x80 | (tms_states & 0x7F);
-
-		libftdi_buffer_write(tmp, 3);
-		tms_states >>= 7;
-		if (ticks < 7)
-			ticks = 0;
-		else
-			ticks -= 7;
+	for (size_t cycle = 0U; cycle < clock_cycles; cycle += 7U) {
+		const uint8_t cmd[3U] = {
+			MPSSE_WRITE_TMS | MPSSE_LSB | MPSSE_BITMODE | MPSSE_WRITE_NEG,
+			MIN(7U, clock_cycles - cycle) - 1U,
+			0x80U | (tms_states & 0x7fU),
+		};
+		tms_states >>= 7U;
+		libftdi_buffer_write_arr(cmd);
 	}
 }
 
-static void jtagtap_tdi_seq(const bool final_tms, const uint8_t *DI, size_t ticks)
+static void ftdi_jtag_tdi_seq(const bool final_tms, const uint8_t *const data_in, const size_t clock_cycles)
 {
-	return libftdi_jtagtap_tdi_tdo_seq(NULL,  final_tms, DI, ticks);
+	return ftdi_jtag_tdi_tdo_seq(NULL, final_tms, data_in, clock_cycles);
 }
 
-static bool jtagtap_next(bool dTMS, bool dTDI)
+static bool ftdi_jtag_next(const bool tms, const bool tdi)
 {
-	uint8_t ret;
-	uint8_t tmp[3] = {MPSSE_WRITE_TMS | MPSSE_DO_READ | MPSSE_LSB |
-					  MPSSE_BITMODE | MPSSE_WRITE_NEG, 0, 0};
-	tmp[2] = (dTDI?0x80:0) | (dTMS?0x01:0);
-	libftdi_buffer_write(tmp, 3);
-	libftdi_buffer_read(&ret, 1);
+	const uint8_t cmd[3] = {
+		MPSSE_WRITE_TMS | MPSSE_DO_READ | MPSSE_LSB | MPSSE_BITMODE | MPSSE_WRITE_NEG,
+		0,
+		(tdi ? 0x80U : 0U) | (tms ? 0x01U : 0U),
+	};
+	libftdi_buffer_write_arr(cmd);
 
-	ret &= 0x80;
-
-	return ret;
+	uint8_t ret = 0;
+	libftdi_buffer_read_val(ret);
+	return ret & 0x80U;
 }
