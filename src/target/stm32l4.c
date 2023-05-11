@@ -647,7 +647,14 @@ static bool stm32l4_attach(target_s *const t)
 			const uint32_t bank_len = flash_len * 1024U;
 			stm32l4_add_flash(t, STM32L4_FLASH_BANK_1_BASE, bank_len, 0x0800, UINT32_MAX);
 		}
-	} else
+	} else if (STM32L4_FAMILY_WLxx == device->family) {
+		
+		stm32l4_add_flash(t, STM32L4_FLASH_BANK_1_BASE, flash_len * 1024U, 0x800, UINT32_MAX);
+		stm32l4_add_flash(t, 0x1FFF7000, 1024U, 0x08, UINT32_MAX);
+		t->flash->writebufsize = 0x08;
+		t->flash->writesize = 0x08;
+	}
+	else
 		stm32l4_add_flash(t, STM32L4_FLASH_BANK_1_BASE, flash_len * 1024U, 0x800, UINT32_MAX);
 
 	/* Clear all errors in the status register. */
